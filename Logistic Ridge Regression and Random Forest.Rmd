@@ -1,0 +1,222 @@
+---
+title: "Corrections"
+author: "Dr. Victor"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+```{r}
+#PART1:DATA PREPARATION AND CLEANING
+
+##Step 1: Import and Clean the Data
+
+###importing the data
+library(tidyverse)
+library(dplyr)
+library(forcats)
+
+###Import the data
+HealthCareData <- read.csv("C:\\Users\\RAINMAKER\\Desktop\\HealthCareData_2024.csv")
+
+#### View the structure of the dataset
+str(HealthCareData)
+### Combine 'Info' and 'Informational' in AlertCategory
+HealthCareData$AlertCategory <- fct_collapse(HealthCareData$AlertCategory,Informational = c("Info", "Informational"))
+
+## Combine 'Policy_Violation' and 'PolicyViolation' in NetworkEventType
+HealthCareData$NetworkEventType <- fct_collapse(HealthCareData$NetworkEventType, PolicyViolation = c("Policy_Violation","PolicyViolation")) 
+
+### Remove invalid data entry for NAF (replace -1 with NA and then remove NAs)
+HealthCareData <- HealthCareData %>%   mutate(NetworkAccessFrequency = ifelse(NetworkAccessFrequency == -1, NA, NetworkAccessFrequency)) %>%  filter(!is.na(NetworkAccessFrequency))
+
+### Remove columns with a high proportion of missing values (SystemAccessRate)
+HealthCareData <- HealthCareData %>%  select(-SystemAccessRate)
+### Remove rows where ResponseTime > 150
+HealthCareData <- HealthCareData %>%  filter(ResponseTime <= 150 | ResponseTime != 99999)
+### Select only complete cases
+dat.cleaned <- na.omit(HealthCareData)
+###Merge 'Regular' and 'Unknown' categories in NetworkInteractionType:
+dat.cleaned$NetworkInteractionType <- fct_collapse(dat.cleaned$NetworkInteractionType, Others = c("Regular", "Unknown"))                                                  
+
+
+
+#PART2;GENERATING TRAINING AND TESTING DATASETS
+
+## Separate samples of normal and malicious events
+dat.class0 <- dat.cleaned %>% filter(Classification == "Normal")
+dat.class1 <- dat.cleaned %>% filter(Classification == "Malicious")
+
+## Randomly select samples for training and testing sets
+set.seed(10629048)  
+rows.train0 <- sample(1:nrow(dat.class0), size = 9600, replace = FALSE)
+rows.train1 <- sample(1:nrow(dat.class1), size = 400, replace = FALSE)
+
+train.class0 <- dat.class0[rows.train0,]
+train.class1 <- dat.class1[rows.train1,]
+mydata.ub.train <- rbind(train.class0, train.class1)
+
+train.class1_2 <- train.class1[sample(1:nrow(train.class1), size = 9600, replace = TRUE),]
+mydata.b.train <- rbind(train.class0, train.class1_2)
+
+test.class0 <- dat.class0[-rows.train0,]
+test.class1 <- dat.class1[-rows.train1,]
+mydata.test <- rbind(test.class0, test.class1)
+
+##selecting model
+set.seed(10629048)
+models.list1<-c("Logistic Ridge Regression","Logistic LaSSo Regression","Logistic Elastic-Net Regression")
+models.list2<-c("Classification Tree","Bagging Tree","Random Forest")
+mymodels<- c(sample(models.list1,size = 1),sample(models.list2,size = 1))
+mymodels%>%data.frame
+print(mymodels)
+
+
+#RIDGE REGRESSION
+
+## Load necessary libraries
+library(glmnet)
+library(caret)
+
+## Define the training and testing datasets
+x_train_ub <- model.matrix(Classification ~ . - 1, data = mydata.ub.train)
+y_train_ub <- as.factor(mydata.ub.train$Classification)
+
+x_train_b <- model.matrix(Classification ~ . - 1, data = mydata.b.train)
+y_train_b <- as.factor(mydata.b.train$Classification)
+
+x_test <- model.matrix(Classification ~ . - 1, data = mydata.test)
+y_test <- as.factor(mydata.test$Classification)
+
+## Define control for cross-validation
+control <- trainControl(method = "cv", number = 10)
+
+
+
+## Fit the Ridge Regression model with hyperparameter tuning on the unbalanced training data
+set.seed(10629048)
+## Define grid for hyperparameters tuning (alpha and lambda for glmnet)
+grid <- expand.grid(alpha = 0, lambda = seq(0.01, 0.1, 0.01))
+
+## Fit the Ridge Regression model with hyperparameter tuning on the unbalanced training data
+set.seed(10629048)
+tune.ridge_ub <- train(x = x_train_ub, y = y_train_ub, method = "glmnet", trControl = control, tuneGrid = grid)
+
+## Print the best tuning parameters for unbalanced data
+print(tune.ridge_ub$bestTune)
+
+## Plot the results for unbalanced data
+plot(tune.ridge_ub, main = "Hyperparameter Tuning for Ridge Regression (Unbalanced Data)")
+
+## Fit the Ridge Regression model with hyperparameter tuning on the balanced training data
+set.seed(10629048)
+tune.ridge_b <- train(x = x_train_b, y = y_train_b, method = "glmnet", trControl = control, tuneGrid = grid)
+
+## Print the best tuning parameters for balanced data
+print(tune.ridge_b$bestTune)
+
+## Plot the results for balanced data
+plot(tune.ridge_b, main = "Hyperparameter Tuning for Ridge Regression (Balanced Data)")
+
+## Predictions on the test set using the tuned models
+pred.ridge_ub <- predict(tune.ridge_ub, newdata = x_test)
+pred.ridge_b <- predict(tune.ridge_b, newdata = x_test)
+
+## Compute confusion matrix for unbalanced data
+confusionMatrix(pred.ridge_ub, y_test)
+
+##Compute confusion matrix for balanced data
+confusionMatrix(pred.ridge_b, y_test)
+
+
+
+###RANDOM FOREST ------------------------------------------------------------------
+
+
+library(randomForest)
+library(caret)
+set.seed(10629048)
+
+
+### Tune model on balanced data
+
+# Define train control with parallel processing
+control <- trainControl(method = "cv", number = 5)
+
+# Define tuning grid with reduced combinations
+tunegrid <- expand.grid(mtry = c(2, 3, 4))  # Reduce the range of mtry values
+
+rf.tune.b <- train(Classification ~ ., data = mydata.b.train, method = "rf",ntree = 300,trControl = control, tuneGrid = tunegrid)
+# Print the tuned model
+print(rf.tune.b)
+
+plot(rf.tune.b) 
+
+### Predict on test data
+# Ensure Column Consistency
+common_columns <- intersect(names(mydata.b.train), names(mydata.test))
+mydata.test.b <- mydata.test[, common_columns]
+
+# Re-create the Model Matrices
+x_test <- model.matrix(Classification ~ ., data = mydata.test.b)
+y_test <- as.factor(mydata.test.b$Classification)
+
+# Make Predictions
+
+pred.rf_b <- predict(rf.tune.b, newdata = mydata.test.b)
+
+confusionMatrix(pred.rf_b, y_test)
+
+
+#Hyperparameter Tuning/Search Strategy for unbalanced dataset
+ 
+### Control setup for training
+control <- trainControl(method = "cv", number = 5)
+
+### Define tuning grid
+tunegrid <- expand.grid(mtry = c(2, 3, 4))
+
+### Tune model on unbalanced data
+rf.tube.ub <- train(Classification ~ ., data = mydata.ub.train, method = "rf", ntree = 300, trControl = control,tuneGrid = tunegrid)
+
+print(rf.tube.ub)
+plot(rf.tube.ub)
+
+# Ensure Column Consistency with Unbalanced Training Data
+common_columns_ub <- intersect(names(mydata.ub.train), names(mydata.test))
+mydata.test_ub <- mydata.test[, common_columns_ub]
+
+# Check which predictors are used in the model
+model_predictors <- colnames(rf.tube.ub$trainingData)[-1]  # Exclude ".outcome"
+
+# Filter test data to include only the predictors used in the model
+x_test_ub <- mydata.test_ub[, model_predictors]
+
+# Ensure the column order matches the model's training data
+x_test_ub <- x_test_ub[, colnames(rf.tube.ub$trainingData)[-1]]
+y_test_ub <- as.factor(mydata.test_ub$Classification)
+
+# Step 1: Make predictions
+pred.rf_ub <- predict(rf.tube.ub, newdata = x_test_ub)
+# Create Confusion Matrix
+confusionMatrix(pred.rf_ub, reference = y_test_ub)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```
